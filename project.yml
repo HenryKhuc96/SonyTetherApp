@@ -13,12 +13,13 @@ targets:
     platform: iOS
     deploymentTarget: "16.0" 
     settings:
-      TARGETED_DEVICE_FAMILY: 2 # 1 là iPhone, 2 là iPad
+      TARGETED_DEVICE_FAMILY: 2
     sources: 
       - Sources
     dependencies:
       - package: CascableCore
     info:
+      path: Info.plist
       properties:
         UILaunchScreen: {}
         NSPhotoLibraryAddUsageDescription: "Cấp quyền để lưu ảnh trực tiếp từ máy ảnh vào Photos."
