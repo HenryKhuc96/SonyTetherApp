@@ -3,7 +3,7 @@ name: Build Unsigned IPA
 on:
   push:
     branches: [ "main" ]
-  workflow_dispatch: 
+  workflow_dispatch:
 
 jobs:
   build:
@@ -19,12 +19,18 @@ jobs:
       - name: Generate Xcode Project
         run: xcodegen generate
 
+      - name: Resolve Package Dependencies
+        run: |
+          xcodebuild -resolvePackageDependencies \
+            -project SonyTetherApp.xcodeproj \
+            -scheme SonyTetherApp
+
       - name: Build Unsigned App
         run: |
           xcodebuild clean build \
             -project SonyTetherApp.xcodeproj \
             -scheme SonyTetherApp \
-            -configuration Release \
+            -configuration Debug \
             -sdk iphoneos \
             -derivedDataPath build \
             CODE_SIGN_IDENTITY="" \
@@ -34,7 +40,7 @@ jobs:
       - name: Package into IPA
         run: |
           mkdir -p Payload
-          mv build/Build/Products/Release-iphoneos/SonyTetherApp.app Payload/
+          cp -r build/Build/Products/Debug-iphoneos/SonyTetherApp.app Payload/
           zip -qr SonyTetherApp.ipa Payload
 
       - name: Upload IPA Artifact
