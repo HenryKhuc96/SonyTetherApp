@@ -36,8 +36,7 @@ class CascableTetherManager: NSObject, ObservableObject, CBLCameraDiscoveryDeleg
         let discovery = CBLCameraDiscovery.sharedInstance()
         discovery.delegate = self
         discovery.clientName = "iPad Pro Tether"
-        // Quét cả cổng USB lẫn mạng Wi-Fi
-        discovery.enabledTransports = [.USB, .network]
+        // Mặc định beginSearching() đã tự động quét cả USB và Network
         discovery.beginSearching()
     }
     
@@ -52,7 +51,8 @@ class CascableTetherManager: NSObject, ObservableObject, CBLCameraDiscoveryDeleg
     }
     
     func cameraDiscovery(_ discovery: CBLCameraDiscovery, didLoseSightOf camera: CBLCamera) {
-        if activeCamera === camera {
+        guard let active = activeCamera else { return }
+        if active.isEqual(camera) {
             DispatchQueue.main.async {
                 self.resetState(message: "Đã ngắt kết nối máy ảnh.")
             }
@@ -65,11 +65,10 @@ class CascableTetherManager: NSObject, ObservableObject, CBLCameraDiscoveryDeleg
         activeCamera = camera
         
         camera.connect(authenticationRequestCallback: { context in
-            // Tự động đồng ý nếu máy ảnh yêu cầu xác thực ghép nối
             context.submitCancellation()
         }, authenticationResolvedCallback: {
             // Đã xác thực xong
-        }, completionCallback: { [weak self] error, warnings in
+        }, completionCallback: { [weak self] error, _ in
             guard let self = self else { return }
             DispatchQueue.main.async {
                 if let error = error {
@@ -85,7 +84,6 @@ class CascableTetherManager: NSObject, ObservableObject, CBLCameraDiscoveryDeleg
     }
     
     private func setupTetherTransferObserver(for camera: CBLCamera) {
-        // Đây là hàm QUAN TRỌNG NHẤT giúp lấy ảnh trực tiếp từ RAM của Sony ở chế độ PC Remote
         transferObserverToken = camera.addCameraInitiatedTransferObserver({ [weak self] request in
             guard let self = self else { return }
             
@@ -93,21 +91,21 @@ class CascableTetherManager: NSObject, ObservableObject, CBLCameraDiscoveryDeleg
                 self.statusMessage = "⚡ Đang nhận ảnh từ bộ nhớ đệm Sony..."
             }
             
-            // Nếu có sẵn định dạng Preview nhẹ, lấy ra hiển thị lên màn hình iPad ngay lập tức
+            // 1. Lấy ảnh Preview hiển thị nhanh lên iPad
             if request.canProvide(.preview) {
-                request.generatePreviewImage { previewImage, _ in
+                request.generatePreviewImage({ previewImage, _ in
                     if let previewImage = previewImage {
                         DispatchQueue.main.async {
                             self.lastPhotoPreview = previewImage
                         }
                     }
-                }
+                })
             }
             
-            // Tải file gốc (RAW hoặc JPEG) về iPad để lưu vào Photos
+            // 2. Lưu file gốc (Original) về thư mục tạm rồi đẩy vào Photos
             if request.canProvide(.original) {
                 let tempDir = FileManager.default.temporaryDirectory
-                request.writeOriginalData(toDestinationFolder: tempDir) { savedURL, error in
+                request.writeOriginalData(toDestinationFolder: tempDir, completionHandler: { savedURL, error in
                     if let savedURL = savedURL, error == nil {
                         self.saveToPhotosLibrary(fileURL: savedURL)
                     } else {
@@ -115,13 +113,12 @@ class CascableTetherManager: NSObject, ObservableObject, CBLCameraDiscoveryDeleg
                             self.statusMessage = "❌ Lỗi nhận file gốc: \(error?.localizedDescription ?? "Không rõ")"
                         }
                     }
-                }
+                })
             }
         })
     }
     
     private func saveToPhotosLibrary(fileURL: URL) {
-        // Cập nhật ảnh preview nếu bước trước chưa có
         if lastPhotoPreview == nil, let img = UIImage(contentsOfFile: fileURL.path) {
             DispatchQueue.main.async {
                 self.lastPhotoPreview = img
@@ -149,13 +146,13 @@ class CascableTetherManager: NSObject, ObservableObject, CBLCameraDiscoveryDeleg
     func triggerShutter() {
         guard let camera = activeCamera, isConnected else { return }
         statusMessage = "📸 Đang lấy nét và chụp..."
-        camera.invokeOneShotShutterExplicitlyEngagingAutoFocus(true) { [weak self] error in
+        camera.invokeOneShotShutterExplicitlyEngagingAutoFocus(true, completionCallback: { [weak self] error in
             if let error = error {
                 DispatchQueue.main.async {
                     self?.statusMessage = "⚠️ Lỗi bấm cò: \(error.localizedDescription)"
                 }
             }
-        }
+        })
     }
     
     func toggleLiveView() {
@@ -167,17 +164,23 @@ class CascableTetherManager: NSObject, ObservableObject, CBLCameraDiscoveryDeleg
             liveViewImage = nil
         } else {
             isLiveViewActive = true
-            camera.beginLiveViewStream(delivery: { [weak self] frame, completionHandler in
+            let deliveryHandler: CBLCameraLiveViewFrameDelivery = { [weak self] frame, completionHandler in
                 DispatchQueue.main.async {
                     self?.liveViewImage = frame.image
                     completionHandler()
                 }
-            },deliveryQueue: DispatchQueue.main, terminationHandler: { [weak self] reason, error in
-                DispatchQueue.main.async {
-                    self?.isLiveViewActive = false
-                    self?.liveViewImage = nil
+            }
+            
+            camera.beginLiveViewStream(
+                delivery: deliveryHandler,
+                deliveryQueue: DispatchQueue.main,
+                terminationHandler: { [weak self] _, _ in
+                    DispatchQueue.main.async {
+                        self?.isLiveViewActive = false
+                        self?.liveViewImage = nil
+                    }
                 }
-            })
+            )
         }
     }
     
@@ -200,7 +203,6 @@ struct ContentView: View {
     var body: some View {
         NavigationStack {
             VStack(spacing: 16) {
-                // Thanh trạng thái
                 HStack {
                     Circle()
                         .fill(tetherManager.isConnected ? Color.green : Color.red)
@@ -220,7 +222,6 @@ struct ContentView: View {
                 .background(Color(UIColor.secondarySystemBackground))
                 .cornerRadius(12)
                 
-                // Khung hiển thị Ảnh vừa chụp hoặc Live View
                 ZStack {
                     RoundedRectangle(cornerRadius: 16)
                         .fill(Color.black.opacity(0.95))
@@ -257,7 +258,6 @@ struct ContentView: View {
                 }
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
                 
-                // Cụm nút điều khiển
                 HStack(spacing: 16) {
                     Button(action: {
                         tetherManager.toggleLiveView()
