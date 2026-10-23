@@ -1,22 +1,16 @@
 import SwiftUI
 import ImageCaptureCore
 import Photos
-
-@main
-struct SonyTetherApp: App {
-    var body: some Scene {
-        WindowGroup {
-            ContentView()
-        }
-    }
-}
+import ImageIO
 
 class CameraTetherManager: NSObject, ObservableObject, ICDeviceBrowserDelegate, ICCameraDeviceDelegate, ICCameraDeviceDownloadDelegate {
     private var deviceBrowser = ICDeviceBrowser()
     private var connectedCamera: ICCameraDevice?
-    
-    // Cờ kiểm tra đã đọc xong danh sách ảnh cũ trên thẻ nhớ hay chưa
     private var isCatalogReady: Bool = false
+    
+    // Hàng đợi tải tuần tự giúp không bị nghẽn cáp khi chụp liên tục hoặc RAW + JPEG
+    private var downloadQueue: [ICCameraFile] = []
+    private var isDownloading: Bool = false
     
     @Published var statusMessage: String = "Đang tìm kiếm Sony A7 III qua cáp USB..."
     @Published var isConnected: Bool = false
@@ -64,12 +58,18 @@ class CameraTetherManager: NSObject, ObservableObject, ICDeviceBrowserDelegate, 
     
     func deviceBrowser(_ browser: ICDeviceBrowser, didRemove device: ICDevice, moreGoing: Bool) {
         if device == connectedCamera {
-            DispatchQueue.main.async {
-                self.isConnected = false
-                self.isCatalogReady = false
-                self.connectedCamera = nil
-                self.statusMessage = "Đã ngắt kết nối máy ảnh."
-            }
+            resetConnectionState(message: "Đã ngắt kết nối máy ảnh.")
+        }
+    }
+    
+    private func resetConnectionState(message: String) {
+        DispatchQueue.main.async {
+            self.isConnected = false
+            self.isCatalogReady = false
+            self.isDownloading = false
+            self.downloadQueue.removeAll()
+            self.connectedCamera = nil
+            self.statusMessage = message
         }
     }
     
@@ -86,7 +86,6 @@ class CameraTetherManager: NSObject, ObservableObject, ICDeviceBrowserDelegate, 
         }
     }
     
-    // BẮT BUỘC: Đánh dấu máy ảnh đã đọc xong các ảnh cũ trên thẻ nhớ
     func deviceDidBecomeReady(withCompleteContentCatalog device: ICCameraDevice) {
         DispatchQueue.main.async {
             self.isCatalogReady = true
@@ -95,50 +94,53 @@ class CameraTetherManager: NSObject, ObservableObject, ICDeviceBrowserDelegate, 
     }
     
     func didRemove(_ device: ICDevice) {
-        DispatchQueue.main.async {
-            self.isConnected = false
-            self.isCatalogReady = false
-            self.connectedCamera = nil
-            self.statusMessage = "Máy ảnh đã rút cáp."
-        }
+        resetConnectionState(message: "Máy ảnh đã rút cáp.")
     }
     
     func cameraDevice(_ camera: ICCameraDevice, didAdd items: [ICCameraItem]) {
-        // Bỏ qua toàn bộ ảnh cũ có sẵn trong thẻ nhớ lúc mới cắm cáp
         guard isCatalogReady else { return }
         
+        var addedFiles: [ICCameraFile] = []
         for item in items {
             if let file = item as? ICCameraFile {
-                let fileName = file.name ?? ""
-                let upperName = fileName.uppercased()
+                let upperName = (file.name ?? "").uppercased()
                 if upperName.hasSuffix(".JPG") || upperName.hasSuffix(".JPEG") || upperName.hasSuffix(".ARW") {
-                    DispatchQueue.main.async {
-                        self.statusMessage = "⚡ Đang tải ảnh mới: \(fileName)..."
-                    }
-                    downloadFileFromCamera(file)
+                    addedFiles.append(file)
                 }
             }
         }
+        
+        guard !addedFiles.isEmpty else { return }
+        
+        DispatchQueue.main.async {
+            self.downloadQueue.append(contentsOf: addedFiles)
+            self.processNextDownload()
+        }
     }
     
-    // MARK: - Download & Save
+    // MARK: - Sequential Download Queue & Fast Preview
     
-    private func downloadFileFromCamera(_ file: ICCameraFile) {
-        let tempDir = FileManager.default.temporaryDirectory
-        let targetFileName = file.name ?? "Sony_\(UUID().uuidString).JPG"
+    private func processNextDownload() {
+        guard !isDownloading, !downloadQueue.isEmpty, let camera = connectedCamera else { return }
         
-        // Xóa file trùng tên trong thư mục tạm nếu có trước khi tải
-        let expectedURL = tempDir.appendingPathComponent(targetFileName)
+        isDownloading = true
+        let nextFile = downloadQueue.removeFirst()
+        let fileName = nextFile.name ?? "Sony_\(UUID().uuidString).JPG"
+        
+        statusMessage = "⚡ Đang tải: \(fileName) (Còn chờ: \(downloadQueue.count))..."
+        
+        let tempDir = FileManager.default.temporaryDirectory
+        let expectedURL = tempDir.appendingPathComponent(fileName)
         try? FileManager.default.removeItem(at: expectedURL)
         
         let options: [ICDownloadOption: Any] = [
             .downloadsDirectoryURL: tempDir,
-            .saveAsFilename: targetFileName,
+            .saveAsFilename: fileName,
             .overwrite: true
         ]
         
-        connectedCamera?.requestDownloadFile(
-            file,
+        camera.requestDownloadFile(
+            nextFile,
             options: options,
             downloadDelegate: self,
             didDownloadSelector: #selector(didDownloadFile(_:error:options:contextInfo:)),
@@ -150,6 +152,8 @@ class CameraTetherManager: NSObject, ObservableObject, ICDeviceBrowserDelegate, 
         if let error = error {
             DispatchQueue.main.async {
                 self.statusMessage = "❌ Lỗi tải ảnh: \(error.localizedDescription)"
+                self.isDownloading = false
+                self.processNextDownload()
             }
             return
         }
@@ -161,23 +165,41 @@ class CameraTetherManager: NSObject, ObservableObject, ICDeviceBrowserDelegate, 
         guard FileManager.default.fileExists(atPath: fileURL.path) else {
             DispatchQueue.main.async {
                 self.statusMessage = "❌ Không tìm thấy file sau khi tải."
+                self.isDownloading = false
+                self.processNextDownload()
             }
             return
         }
         
-        // Hiển thị preview (ưu tiên JPG hoặc dùng ImageIO để giảm tải RAM)
-        if let image = UIImage(contentsOfFile: fileURL.path) {
+        // Tạo ảnh Preview nhẹ bằng ImageIO (hỗ trợ cả .ARW và .JPG mà không gây tràn RAM)
+        if let preview = generateFastPreview(from: fileURL, maxPixelSize: 1600) {
             DispatchQueue.main.async {
-                self.lastPhotoPreview = image
+                self.lastPhotoPreview = preview
             }
         }
         
         saveToPhotosLibrary(fileURL: fileURL)
     }
     
+    private func generateFastPreview(from fileURL: URL, maxPixelSize: CGFloat) -> UIImage? {
+        let sourceOptions = [kCGImageSourceShouldCache: false] as CFDictionary
+        guard let source = CGImageSourceCreateWithURL(fileURL as CFURL, sourceOptions) else { return nil }
+        
+        let thumbnailOptions: [CFString: Any] = [
+            kCGImageSourceCreateThumbnailFromImageAlways: true,
+            kCGImageSourceShouldCacheImmediately: true,
+            kCGImageSourceCreateThumbnailWithTransform: true,
+            kCGImageSourceThumbnailMaxPixelSize: maxPixelSize
+        ]
+        
+        guard let cgImage = CGImageSourceCreateThumbnailAtIndex(source, 0, thumbnailOptions as CFDictionary) else {
+            return nil
+        }
+        return UIImage(cgImage: cgImage)
+    }
+    
     private func saveToPhotosLibrary(fileURL: URL) {
         PHPhotoLibrary.shared().performChanges({
-            // Dùng PHAssetCreationRequest để hỗ trợ cả file .JPG và .ARW (Sony RAW)
             let creationRequest = PHAssetCreationRequest.forAsset()
             creationRequest.addResource(with: .photo, fileURL: fileURL, options: nil)
         }) { success, error in
@@ -188,15 +210,19 @@ class CameraTetherManager: NSObject, ObservableObject, ICDeviceBrowserDelegate, 
                 } else {
                     self.statusMessage = "❌ Lỗi lưu Photos: \(error?.localizedDescription ?? "Không rõ")"
                 }
-                // Dọn dẹp file tạm
+                
                 try? FileManager.default.removeItem(at: fileURL)
+                
+                // Tiếp tục tải file tiếp theo trong hàng đợi
+                self.isDownloading = false
+                self.processNextDownload()
             }
         }
     }
     
     func triggerShutterFromiPad() {
         guard let camera = connectedCamera, camera.canTakePicture else {
-            statusMessage = "⚠️ Máy ảnh không hỗ trợ bấm chụp qua giao thức hiện tại."
+            statusMessage = "⚠️ Máy ảnh không hỗ trợ bấm chụp qua chế độ USB hiện tại."
             return
         }
         camera.requestTakePicture()
@@ -212,73 +238,4 @@ class CameraTetherManager: NSObject, ObservableObject, ICDeviceBrowserDelegate, 
     func cameraDevice(_ camera: ICCameraDevice, didReceiveMetadata metadata: [AnyHashable : Any]?, for item: ICCameraItem, error: Error?) {}
     func cameraDeviceDidEnableAccessRestriction(_ device: ICDevice) {}
     func cameraDeviceDidRemoveAccessRestriction(_ device: ICDevice) {}
-}
-
-struct ContentView: View {
-    @StateObject private var tetherManager = CameraTetherManager()
-    
-    var body: some View {
-        NavigationStack {
-            VStack(spacing: 20) {
-                HStack {
-                    Circle()
-                        .fill(tetherManager.isConnected ? Color.green : Color.red)
-                        .frame(width: 14, height: 14)
-                    Text(tetherManager.statusMessage)
-                        .font(.headline)
-                    Spacer()
-                    Text("Đã lưu: \(tetherManager.capturedCount)")
-                        .font(.subheadline)
-                        .padding(.horizontal, 12)
-                        .padding(.vertical, 6)
-                        .background(Color.blue.opacity(0.15))
-                        .cornerRadius(8)
-                }
-                .padding()
-                .background(Color(UIColor.secondarySystemBackground))
-                .cornerRadius(12)
-                
-                ZStack {
-                    RoundedRectangle(cornerRadius: 16)
-                        .fill(Color.black.opacity(0.9))
-                    
-                    if let previewImage = tetherManager.lastPhotoPreview {
-                        Image(uiImage: previewImage)
-                            .resizable()
-                            .scaledToFit()
-                            .cornerRadius(12)
-                            .padding(8)
-                    } else {
-                        VStack(spacing: 12) {
-                            Image(systemName: "camera.metering.center.weighted")
-                                .font(.system(size: 60))
-                                .foregroundColor(.gray)
-                            Text("Cắm cáp USB-C từ Sony A7 III vào iPad\nBấm chụp trên máy ảnh để ảnh tự lưu vào Photos")
-                                .multilineTextAlignment(.center)
-                                .foregroundColor(.gray)
-                        }
-                    }
-                }
-                .frame(maxWidth: .infinity, maxHeight: .infinity)
-                
-                Button(action: {
-                    tetherManager.triggerShutterFromiPad()
-                }) {
-                    HStack {
-                        Image(systemName: "camera.shutter.button.fill")
-                        Text("Bấm Chụp Từ iPad")
-                            .fontWeight(.bold)
-                    }
-                    .frame(maxWidth: .infinity)
-                    .padding()
-                    .background(tetherManager.isConnected ? Color.orange : Color.gray)
-                    .foregroundColor(.white)
-                    .cornerRadius(12)
-                }
-                .disabled(!tetherManager.isConnected)
-            }
-            .padding()
-            .navigationTitle("Sony A7 III Auto-Tether")
-        }
-    }
 }
