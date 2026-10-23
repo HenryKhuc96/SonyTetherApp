@@ -21,7 +21,6 @@ targets:
       - package: CascableCore
         product: CascableCore
     info:
-      path: Sources/Info.plist
       properties:
         UILaunchScreen: {}
         NSPhotoLibraryAddUsageDescription: "Cấp quyền để lưu ảnh trực tiếp từ máy ảnh vào Photos."
