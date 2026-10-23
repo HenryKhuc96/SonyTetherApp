@@ -11,7 +11,7 @@ struct SonyTetherApp: App {
     }
 }
 
-class CascableTetherManager: NSObject, ObservableObject, CBLCameraDiscoveryDelegate {
+class CascableTetherManager: NSObject, ObservableObject, CameraDiscoveryDelegate {
     @Published var statusMessage: String = "Đang tìm Sony A7 III (Hãy bật PC Remote)..."
     @Published var isConnected: Bool = false
     @Published var capturedCount: Int = 0
@@ -19,8 +19,8 @@ class CascableTetherManager: NSObject, ObservableObject, CBLCameraDiscoveryDeleg
     @Published var liveViewImage: UIImage? = nil
     @Published var isLiveViewActive: Bool = false
     
-    private var activeCamera: CBLCamera?
-    private var transferObserverToken: String?
+    private var activeCamera: Camera?
+    private var transferObserverToken: Any?
     
     override init() {
         super.init()
@@ -33,15 +33,15 @@ class CascableTetherManager: NSObject, ObservableObject, CBLCameraDiscoveryDeleg
     }
     
     private func setupCascableDiscovery() {
-        let discovery = CBLCameraDiscovery.shared
+        let discovery = CameraDiscovery.shared
         discovery.delegate = self
         discovery.clientName = "iPad Pro Tether"
         discovery.beginSearching()
     }
     
-    // MARK: - CBLCameraDiscoveryDelegate
+    // MARK: - CameraDiscoveryDelegate (Đã đổi tên chuẩn theo API mới)
     
-    func cameraDiscovery(_ discovery: CBLCameraDiscovery, didDiscover camera: CBLCamera) {
+    func discovery(_ discovery: CameraDiscovery, didDiscover camera: Camera) {
         guard activeCamera == nil else { return }
         DispatchQueue.main.async {
             self.statusMessage = "Đã thấy \(camera.friendlyDisplayName ?? "Sony"). Đang kết nối..."
@@ -49,7 +49,7 @@ class CascableTetherManager: NSObject, ObservableObject, CBLCameraDiscoveryDeleg
         }
     }
     
-    func cameraDiscovery(_ discovery: CBLCameraDiscovery, didLoseSightOf camera: CBLCamera) {
+    func discovery(_ discovery: CameraDiscovery, didLoseSightOf camera: Camera) {
         guard let active = activeCamera else { return }
         if active.isEqual(camera) {
             DispatchQueue.main.async {
@@ -60,7 +60,7 @@ class CascableTetherManager: NSObject, ObservableObject, CBLCameraDiscoveryDeleg
     
     // MARK: - Kết nối & Lắng nghe ảnh chụp từ PC Remote
     
-    private func connectToCamera(_ camera: CBLCamera) {
+    private func connectToCamera(_ camera: Camera) {
         activeCamera = camera
         
         camera.connect(authenticationRequestCallback: { context in
@@ -82,8 +82,8 @@ class CascableTetherManager: NSObject, ObservableObject, CBLCameraDiscoveryDeleg
         })
     }
     
-    private func setupTetherTransferObserver(for camera: CBLCamera) {
-        transferObserverToken = camera.addCameraInitiatedTransferObserver({ [weak self] request in
+    private func setupTetherTransferObserver(for camera: Camera) {
+        transferObserverToken = camera.addCameraInitiatedTransferObserver { [weak self] request in
             guard let self = self else { return }
             
             DispatchQueue.main.async {
@@ -112,7 +112,7 @@ class CascableTetherManager: NSObject, ObservableObject, CBLCameraDiscoveryDeleg
                     }
                 }
             }
-        })
+        }
     }
     
     private func saveToPhotosLibrary(fileURL: URL) {
