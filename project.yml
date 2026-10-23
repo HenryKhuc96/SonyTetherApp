@@ -3,25 +3,29 @@ options:
   bundleIdPrefix: com.sonytether
 
 packages:
-  CascableCoreSwift:
-    url: https://github.com/Cascable/cascablecore-swift.git
-    from: 14.0.0
+  CascableCore:
+    url: https://github.com/Cascable/cascablecore-distribution.git
+    from: 16.0.0
 
 targets:
   SonyTetherApp:
     type: application
     platform: iOS
-    deploymentTarget: "16.0" 
+    deploymentTarget: "16.0"
     settings:
-      TARGETED_DEVICE_FAMILY: 2
-    sources: 
+      TARGETED_DEVICE_FAMILY: "1,2"
+      GENERATE_INFOPLIST_FILE: YES
+    sources:
       - Sources
     dependencies:
-      - package: CascableCoreSwift
+      - package: CascableCore
+        product: CascableCore
     info:
-      path: Info.plist
+      path: Sources/Info.plist
       properties:
         UILaunchScreen: {}
         NSPhotoLibraryAddUsageDescription: "Cấp quyền để lưu ảnh trực tiếp từ máy ảnh vào Photos."
-        UISupportedExternalAccessoryProtocols: 
+        NSCameraUsageDescription: "Cấp quyền kết nối với máy ảnh Sony qua cáp USB."
+        NSLocalNetworkUsageDescription: "Cấp quyền kết nối với máy ảnh trong mạng nội bộ."
+        UISupportedExternalAccessoryProtocols:
           - com.apple.ptp
