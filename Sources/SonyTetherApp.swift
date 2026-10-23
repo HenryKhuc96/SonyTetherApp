@@ -33,15 +33,15 @@ class CascableTetherManager: NSObject, ObservableObject, CameraDiscoveryDelegate
     }
     
     private func setupCascableDiscovery() {
-        let discovery = CameraDiscovery.shared
+        let discovery = CameraDiscovery.sharedInstance()
         discovery.delegate = self
         discovery.clientName = "iPad Pro Tether"
         discovery.beginSearching()
     }
     
-    // MARK: - CameraDiscoveryDelegate (Đã đổi tên chuẩn theo API mới)
+    // MARK: - CameraDiscoveryDelegate
     
-    func discovery(_ discovery: CameraDiscovery, didDiscover camera: Camera) {
+    func cameraDiscovery(_ discovery: CameraDiscovery, didDiscoverCamera camera: Camera) {
         guard activeCamera == nil else { return }
         DispatchQueue.main.async {
             self.statusMessage = "Đã thấy \(camera.friendlyDisplayName ?? "Sony"). Đang kết nối..."
@@ -49,7 +49,7 @@ class CascableTetherManager: NSObject, ObservableObject, CameraDiscoveryDelegate
         }
     }
     
-    func discovery(_ discovery: CameraDiscovery, didLoseSightOf camera: Camera) {
+    func cameraDiscovery(_ discovery: CameraDiscovery, didLoseSightOfCamera camera: Camera) {
         guard let active = activeCamera else { return }
         if active.isEqual(camera) {
             DispatchQueue.main.async {
@@ -77,49 +77,46 @@ class CascableTetherManager: NSObject, ObservableObject, CameraDiscoveryDelegate
                 
                 self.isConnected = true
                 self.statusMessage = "✅ Đã kết nối: \(camera.friendlyDisplayName ?? "Sony A7 III"). Sẵn sàng chụp!"
-                self.setupTetherTransferObserver(for: camera)
+                self.setupFileObserver(for: camera)
             }
         })
     }
     
-    private func setupTetherTransferObserver(for camera: Camera) {
-        transferObserverToken = camera.addCameraInitiatedTransferObserver { [weak self] request in
+    private func setupFileObserver(for camera: Camera) {
+        transferObserverToken = camera.fileSystem.addObserver { [weak self] event in
             guard let self = self else { return }
-            
-            DispatchQueue.main.async {
-                self.statusMessage = "⚡ Đang nhận ảnh từ bộ nhớ đệm Sony..."
-            }
-            
-            if request.canProvide(.preview) {
-                request.generatePreviewImage { previewImage, _ in
-                    if let previewImage = previewImage {
-                        DispatchQueue.main.async {
-                            self.lastPhotoPreview = previewImage
-                        }
-                    }
-                }
-            }
-            
-            if request.canProvide(.original) {
-                let tempDir = FileManager.default.temporaryDirectory
-                request.writeOriginalData(toDestinationFolder: tempDir) { savedURL, error in
-                    if let savedURL = savedURL, error == nil {
-                        self.saveToPhotosLibrary(fileURL: savedURL)
-                    } else {
-                        DispatchQueue.main.async {
-                            self.statusMessage = "❌ Lỗi nhận file gốc: \(error?.localizedDescription ?? "Không rõ")"
-                        }
-                    }
+            if case .fileAdded(let file) = event {
+                let fileName = file.name.uppercased()
+                if fileName.hasSuffix(".JPG") || fileName.hasSuffix(".ARW") {
+                    self.downloadAndSavePhoto(file: file, from: camera)
                 }
             }
         }
     }
     
-    private func saveToPhotosLibrary(fileURL: URL) {
-        if lastPhotoPreview == nil, let img = UIImage(contentsOfFile: fileURL.path) {
+    private func downloadAndSavePhoto(file: FileSystemItem, from camera: Camera) {
+        DispatchQueue.main.async {
+            self.statusMessage = "⚡ Đang tải ảnh mới: \(file.name)..."
+        }
+        
+        let tempDir = FileManager.default.temporaryDirectory
+        let fileURL = tempDir.appendingPathComponent(file.name)
+        
+        camera.fileSystem.downloadItem(file, to: fileURL) { [weak self] error in
+            guard let self = self else { return }
             DispatchQueue.main.async {
-                self.lastPhotoPreview = img
+                if let error = error {
+                    self.statusMessage = "❌ Lỗi tải ảnh: \(error.localizedDescription)"
+                    return
+                }
+                self.processDownloadedFile(at: fileURL)
             }
+        } progress: { _ in }
+    }
+    
+    private func processDownloadedFile(at fileURL: URL) {
+        if let image = UIImage(contentsOfFile: fileURL.path) {
+            self.lastPhotoPreview = image
         }
         
         PHPhotoLibrary.shared().performChanges({
@@ -131,19 +128,20 @@ class CascableTetherManager: NSObject, ObservableObject, CameraDiscoveryDelegate
                     self?.capturedCount += 1
                     self?.statusMessage = "✅ Đã lưu vào Photos! (Tổng: \(self?.capturedCount ?? 0))"
                 } else {
-                    self?.statusMessage = "❌ Lỗi lưu Photos: \(error?.localizedDescription ?? "")"
+                    self?.statusMessage = "❌ Lỗi lưu Photos."
                 }
                 try? FileManager.default.removeItem(at: fileURL)
             }
         }
     }
     
-    // MARK: - Điều khiển Chụp & Live View từ iPad
+    // MARK: - Điều khiển Chụp & Live View
     
     func triggerShutter() {
         guard let camera = activeCamera, isConnected else { return }
         statusMessage = "📸 Đang lấy nét và chụp..."
-        camera.invokeOneShotShutterExplicitlyEngagingAutoFocus(true) { [weak self] error in
+        
+        camera.invokeOneShotShutter(explicitlyEngagingAutoFocus: true) { [weak self] error in
             if let error = error {
                 DispatchQueue.main.async {
                     self?.statusMessage = "⚠️ Lỗi bấm cò: \(error.localizedDescription)"
@@ -155,20 +153,25 @@ class CascableTetherManager: NSObject, ObservableObject, CameraDiscoveryDelegate
     func toggleLiveView() {
         guard let camera = activeCamera, isConnected else { return }
         
+        guard let liveView = camera.liveViewStream else {
+            statusMessage = "⚠️ Máy ảnh không hỗ trợ Live View."
+            return
+        }
+        
         if isLiveViewActive {
-            camera.endLiveViewStream()
+            liveView.endStream()
             isLiveViewActive = false
             liveViewImage = nil
         } else {
             isLiveViewActive = true
-            camera.beginLiveViewStream(
+            liveView.beginStream(
                 delivery: { [weak self] frame, completionHandler in
                     DispatchQueue.main.async {
                         self?.liveViewImage = frame.image
                         completionHandler()
                     }
                 },
-                deliveryQueue: DispatchQueue.main,
+                deliveryQueue: .main,
                 terminationHandler: { [weak self] _, _ in
                     DispatchQueue.main.async {
                         self?.isLiveViewActive = false
@@ -180,14 +183,10 @@ class CascableTetherManager: NSObject, ObservableObject, CameraDiscoveryDelegate
     }
     
     private func resetState(message: String) {
-        if let camera = activeCamera, let token = transferObserverToken {
-            camera.removeCameraInitiatedTransferObserver(token)
-        }
         isConnected = false
         isLiveViewActive = false
         liveViewImage = nil
         activeCamera = nil
-        transferObserverToken = nil
         statusMessage = message
     }
 }
