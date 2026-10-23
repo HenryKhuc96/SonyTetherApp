@@ -1,7 +1,7 @@
 import SwiftUI
-import ImageCaptureCore
 import Photos
 import ImageIO
+import Network
 
 @main
 struct SonyTetherApp: App {
@@ -12,179 +12,97 @@ struct SonyTetherApp: App {
     }
 }
 
-class CameraTetherManager: NSObject, ObservableObject, ICDeviceBrowserDelegate, ICCameraDeviceDelegate, ICCameraDeviceDownloadDelegate {
-    private var deviceBrowser = ICDeviceBrowser()
-    private var connectedCamera: ICCameraDevice?
-    
-    // Cờ kiểm tra đã đọc xong danh sách ảnh cũ trên thẻ nhớ hay chưa
-    private var isCatalogReady: Bool = false
-    
-    // Hàng đợi tải tuần tự giúp không bị nghẽn khi chụp liên tục hoặc RAW + JPEG
-    private var downloadQueue: [ICCameraFile] = []
-    private var isDownloading: Bool = false
-    
-    @Published var statusMessage: String = "Đang tìm kiếm Sony A7 III qua cáp USB..."
+class CameraFTPServerManager: ObservableObject {
+    @Published var statusMessage: String = "Đang khởi tạo FTP Server..."
     @Published var isConnected: Bool = false
     @Published var capturedCount: Int = 0
     @Published var lastPhotoPreview: UIImage? = nil
     
-    override init() {
-        super.init()
+    private var listener: NWListener?
+    private var activeConnections: [NWConnection] = []
+    
+    init() {
         requestPhotoLibraryPermission()
-        setupBrowser()
+        startFTPServer(port: 2121) // Sử dụng port 2121 để tránh xung đột quyền hệ thống
     }
     
     private func requestPhotoLibraryPermission() {
         PHPhotoLibrary.requestAuthorization(for: .addOnly) { status in
             if status != .authorized && status != .limited {
                 DispatchQueue.main.async {
-                    self.statusMessage = "⚠️ Cần cấp quyền lưu ảnh vào Photos trong Cài đặt!"
+                    self.statusMessage = "⚠️ Cần cấp quyền lưu ảnh vào Photos!"
                 }
             }
         }
     }
     
-    private func setupBrowser() {
-        deviceBrowser.delegate = self
-        #if os(macOS)
-        deviceBrowser.browsedDeviceTypeMask = ICDeviceTypeMask(rawValue:
-            ICDeviceTypeMask.camera.rawValue | ICDeviceLocationTypeMask.local.rawValue
-        )!
-        #endif
-        deviceBrowser.start()
-    }
-    
-    // MARK: - ICDeviceBrowserDelegate
-    
-    func deviceBrowser(_ browser: ICDeviceBrowser, didAdd device: ICDevice, moreComing: Bool) {
-        guard let camera = device as? ICCameraDevice else { return }
-        DispatchQueue.main.async {
-            self.connectedCamera = camera
-            self.isCatalogReady = false
-            self.connectedCamera?.delegate = self
-            self.statusMessage = "Đã tìm thấy: \(camera.name ?? "Máy ảnh"). Đang mở phiên..."
-            camera.requestOpenSession()
-        }
-    }
-    
-    func deviceBrowser(_ browser: ICDeviceBrowser, didRemove device: ICDevice, moreGoing: Bool) {
-        if device == connectedCamera {
-            resetConnectionState(message: "Đã ngắt kết nối máy ảnh.")
-        }
-    }
-    
-    private func resetConnectionState(message: String) {
-        DispatchQueue.main.async {
-            self.isConnected = false
-            self.isCatalogReady = false
-            self.isDownloading = false
-            self.downloadQueue.removeAll()
-            self.connectedCamera = nil
-            self.statusMessage = message
-        }
-    }
-    
-    // MARK: - ICDeviceDelegate & ICCameraDeviceDelegate
-    
-    func device(_ device: ICDevice, didOpenSessionWithError error: Error?) {
-        DispatchQueue.main.async {
-            if let error = error {
-                self.statusMessage = "Lỗi kết nối: \(error.localizedDescription)"
-            } else {
-                self.isConnected = true
-                self.statusMessage = "⏳ Đang đồng bộ danh mục thẻ nhớ..."
-            }
-        }
-    }
-    
-    // BẮT BUỘC: Đánh dấu máy ảnh đã đọc xong các ảnh cũ trên thẻ nhớ
-    func deviceDidBecomeReady(withCompleteContentCatalog device: ICCameraDevice) {
-        DispatchQueue.main.async {
-            self.isCatalogReady = true
-            self.statusMessage = "✅ Đã kết nối: \(device.name ?? "Sony A7 III"). Sẵn sàng chụp!"
-        }
-    }
-    
-    func didRemove(_ device: ICDevice) {
-        resetConnectionState(message: "Máy ảnh đã rút cáp.")
-    }
-    
-    func cameraDevice(_ camera: ICCameraDevice, didAdd items: [ICCameraItem]) {
-        // Bỏ qua toàn bộ ảnh cũ có sẵn trong thẻ nhớ lúc mới cắm cáp
-        guard isCatalogReady else { return }
-        
-        var addedFiles: [ICCameraFile] = []
-        for item in items {
-            if let file = item as? ICCameraFile {
-                let upperName = (file.name ?? "").uppercased()
-                if upperName.hasSuffix(".JPG") || upperName.hasSuffix(".JPEG") || upperName.hasSuffix(".ARW") {
-                    addedFiles.append(file)
+    // MARK: - FTP Server Setup
+    private func startFTPServer(port: UInt16) {
+        do {
+            let port = NWEndpoint.Port(rawValue: port)!
+            listener = try NWListener(using: .tcp, on: port)
+            
+            listener?.stateUpdateHandler = { state in
+                DispatchQueue.main.async {
+                    switch state {
+                    case .ready:
+                        self.isConnected = true
+                        self.statusMessage = "✅ FTP Server đang chạy (Cổng \(port)). Sẵn sàng nhận ảnh!"
+                    case .failed(let error):
+                        self.isConnected = false
+                        self.statusMessage = "❌ Lỗi Server: \(error.localizedDescription)"
+                    default:
+                        break
+                    }
                 }
             }
+            
+            listener?.newConnectionHandler = { [weak self] connection in
+                self?.handleNewConnection(connection)
+            }
+            
+            listener?.start(queue: .global(qos: .background))
+        } catch {
+            statusMessage = "❌ Không thể khởi tạo Server: \(error.localizedDescription)"
         }
+    }
+    
+    private func handleNewConnection(_ connection: NWConnection) {
+        connection.start(queue: .global(qos: .background))
+        activeConnections.append(connection)
         
-        guard !addedFiles.isEmpty else { return }
-        
+        // Gửi phản hồi chào mừng của FTP
+        let welcomeMessage = "220 iPad FTP Server Ready\r\n".data(using: .utf8)!
+        connection.send(content: welcomeMessage, completion: .contentProcessed({ error in
+            if error == nil {
+                self.receiveFTPCommands(on: connection)
+            }
+        }))
+    }
+    
+    private func receiveFTPCommands(on connection: NWConnection) {
+        connection.receive(minimumIncompleteLength: 1, maximumLength: 1024) { content, _, isComplete, error in
+            if let data = content, let command = String(data: data, encoding: .utf8) {
+                // Xử lý các lệnh FTP (USER, PASS, TYPE, PASV, STOR)
+                // Lưu ý: Ở đây bạn cần parse lệnh STOR để bắt đầu ghi luồng dữ liệu file (Data Connection) vào thư mục tạm.
+                // Khi nhận xong một file từ lệnh STOR, gọi hàm `processReceivedFile(at:)`
+                print("Nhận lệnh FTP: \(command)")
+                
+                // Phản hồi giả lập để giữ kết nối (cần thay thế bằng logic FTP chuẩn)
+                let response = "200 Command okay\r\n".data(using: .utf8)!
+                connection.send(content: response, completion: .contentProcessed({ _ in
+                    if !isComplete { self.receiveFTPCommands(on: connection) }
+                }))
+            }
+        }
+    }
+    
+    // MARK: - Photo Processing
+    func processReceivedFile(at fileURL: URL) {
         DispatchQueue.main.async {
-            self.downloadQueue.append(contentsOf: addedFiles)
-            self.processNextDownload()
-        }
-    }
-    
-    // MARK: - Download & Save
-    
-    private func processNextDownload() {
-        guard !isDownloading, !downloadQueue.isEmpty, let camera = connectedCamera else { return }
-        
-        isDownloading = true
-        let nextFile = downloadQueue.removeFirst()
-        let targetFileName = nextFile.name ?? "Sony_\(UUID().uuidString).JPG"
-        
-        statusMessage = "⚡ Đang tải ảnh mới: \(targetFileName)..."
-        
-        let tempDir = FileManager.default.temporaryDirectory
-        let expectedURL = tempDir.appendingPathComponent(targetFileName)
-        try? FileManager.default.removeItem(at: expectedURL)
-        
-        let options: [ICDownloadOption: Any] = [
-            .downloadsDirectoryURL: tempDir,
-            .saveAsFilename: targetFileName,
-            .overwrite: true
-        ]
-        
-        camera.requestDownloadFile(
-            nextFile,
-            options: options,
-            downloadDelegate: self,
-            didDownloadSelector: #selector(didDownloadFile(_:error:options:contextInfo:)),
-            contextInfo: nil
-        )
-    }
-    
-    @objc func didDownloadFile(_ file: ICCameraFile, error: Error?, options: [String: Any], contextInfo: UnsafeMutableRawPointer?) {
-        if let error = error {
-            DispatchQueue.main.async {
-                self.statusMessage = "❌ Lỗi tải ảnh: \(error.localizedDescription)"
-                self.isDownloading = false
-                self.processNextDownload()
-            }
-            return
+            self.statusMessage = "⚡ Đang xử lý ảnh mới..."
         }
         
-        let tempDir = FileManager.default.temporaryDirectory
-        let savedFilename = (options[ICDownloadOption.savedFilename.rawValue] as? String) ?? file.name ?? ""
-        let fileURL = tempDir.appendingPathComponent(savedFilename)
-        
-        guard FileManager.default.fileExists(atPath: fileURL.path) else {
-            DispatchQueue.main.async {
-                self.statusMessage = "❌ Không tìm thấy file sau khi tải."
-                self.isDownloading = false
-                self.processNextDownload()
-            }
-            return
-        }
-        
-        // Tạo preview bằng ImageIO (hỗ trợ cả .JPG và Sony RAW .ARW nhẹ RAM)
         if let image = generateFastPreview(from: fileURL, maxPixelSize: 1600) {
             DispatchQueue.main.async {
                 self.lastPhotoPreview = image
@@ -226,27 +144,13 @@ class CameraTetherManager: NSObject, ObservableObject, ICDeviceBrowserDelegate, 
                     self.statusMessage = "❌ Lỗi lưu Photos: \(error?.localizedDescription ?? "Không rõ")"
                 }
                 try? FileManager.default.removeItem(at: fileURL)
-                self.isDownloading = false
-                self.processNextDownload()
             }
         }
     }
-    
-    // MARK: - Các hàm bắt buộc còn lại của ICCameraDeviceDelegate trên iOS 18 SDK
-    
-    func device(_ device: ICDevice, didCloseSessionWithError error: Error?) {}
-    func cameraDevice(_ camera: ICCameraDevice, didRemove items: [ICCameraItem]) {}
-    func cameraDevice(_ camera: ICCameraDevice, didRenameItems items: [ICCameraItem]) {}
-    func cameraDeviceDidChangeCapability(_ camera: ICCameraDevice) {}
-    func cameraDevice(_ camera: ICCameraDevice, didReceiveThumbnail thumbnail: CGImage?, for item: ICCameraItem, error: Error?) {}
-    func cameraDevice(_ camera: ICCameraDevice, didReceiveMetadata metadata: [AnyHashable : Any]?, for item: ICCameraItem, error: Error?) {}
-    func cameraDevice(_ camera: ICCameraDevice, didReceivePTPEvent eventData: Data) {}
-    func cameraDeviceDidEnableAccessRestriction(_ device: ICDevice) {}
-    func cameraDeviceDidRemoveAccessRestriction(_ device: ICDevice) {}
 }
 
 struct ContentView: View {
-    @StateObject private var tetherManager = CameraTetherManager()
+    @StateObject private var tetherManager = CameraFTPServerManager()
     
     var body: some View {
         NavigationStack {
@@ -281,10 +185,10 @@ struct ContentView: View {
                             .padding(8)
                     } else {
                         VStack(spacing: 12) {
-                            Image(systemName: "camera.metering.center.weighted")
+                            Image(systemName: "network")
                                 .font(.system(size: 60))
                                 .foregroundColor(.gray)
-                            Text("Cắm cáp USB-C từ Sony A7 III vào iPad\nBấm chụp trên máy ảnh để ảnh tự lưu vào Photos")
+                            Text("Bật FTP Transfer trên Sony A7 III\nTrỏ về IP của iPad ở cổng 2121")
                                 .multilineTextAlignment(.center)
                                 .foregroundColor(.gray)
                         }
@@ -293,7 +197,7 @@ struct ContentView: View {
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
             }
             .padding()
-            .navigationTitle("Sony A7 III Auto-Tether")
+            .navigationTitle("Sony A7 III FTP Tether")
         }
     }
 }
