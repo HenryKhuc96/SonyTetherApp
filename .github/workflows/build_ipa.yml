@@ -2,29 +2,28 @@ name: Build Unsigned IPA
 
 on:
   push:
-    branches: [ main ]
-  workflow_dispatch:
+    branches: [ "main" ]
+  workflow_dispatch: 
 
 jobs:
   build:
-    runs-on: macos-15
+    runs-on: macos-latest
 
     steps:
-      - name: Checkout code
+      - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Generate Xcode Project (XcodeGen)
-        run: |
-          if ! command -v xcodegen &> /dev/null; then
-            brew install xcodegen
-          fi
-          xcodegen generate
+      - name: Install XcodeGen
+        run: brew install xcodegen
+
+      - name: Generate Xcode Project
+        run: xcodegen generate
 
       - name: Build Unsigned App
         run: |
           xcodebuild clean build \
-            -project SonyTether.xcodeproj \
-            -scheme SonyTether \
+            -project SonyTetherApp.xcodeproj \
+            -scheme SonyTetherApp \
             -configuration Release \
             -sdk iphoneos \
             -derivedDataPath build \
@@ -32,14 +31,14 @@ jobs:
             CODE_SIGNING_REQUIRED=NO \
             CODE_SIGNING_ALLOWED=NO
 
-      - name: Package IPA
+      - name: Package into IPA
         run: |
           mkdir -p Payload
-          cp -r build/Build/Products/Release-iphoneos/*.app Payload/
-          zip -r SonyTether_Unsigned.ipa Payload
+          mv build/Build/Products/Release-iphoneos/SonyTetherApp.app Payload/
+          zip -qr SonyTetherApp.ipa Payload
 
       - name: Upload IPA Artifact
         uses: actions/upload-artifact@v4
         with:
-          name: SonyTether-IPA
-          path: SonyTether_Unsigned.ipa
+          name: SonyTetherApp
+          path: SonyTetherApp.ipa
