@@ -1,17 +1,24 @@
 name: SonyTetherApp
-# ... (các cấu hình sẵn có của bạn)
+options:
+  bundleIdPrefix: com.sonytether
 
 packages:
-  CascableCoreSwift:
+  CascableCore:
     url: https://github.com/Cascable/cascablecore-swift.git
-    from: 14.0.0 # Hoặc thay bằng phiên bản release mới nhất trên repo Cascable
+    from: 14.0.0
 
 targets:
   SonyTetherApp:
     type: application
     platform: iOS
+    deploymentTarget: "16.0" 
     sources: 
       - Sources
     dependencies:
-      - package: CascableCoreSwift
-    # ... (các thiết lập info.plist, chứng chỉ của bạn)
+      - package: CascableCore
+    info:
+      properties:
+        UILaunchScreen: {}
+        NSPhotoLibraryAddUsageDescription: "Cấp quyền để lưu ảnh trực tiếp từ máy ảnh vào Photos."
+        UISupportedExternalAccessoryProtocols: 
+          - com.apple.ptp
