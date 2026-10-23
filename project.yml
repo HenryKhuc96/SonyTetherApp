@@ -12,6 +12,8 @@ targets:
     type: application
     platform: iOS
     deploymentTarget: "16.0" 
+    settings:
+      TARGETED_DEVICE_FAMILY: 2 # 1 là iPhone, 2 là iPad
     sources: 
       - Sources
     dependencies:
