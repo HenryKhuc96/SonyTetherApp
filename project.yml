@@ -3,7 +3,7 @@ options:
   bundleIdPrefix: com.sonytether
 
 packages:
-  CascableCore:
+  CascableCoreSwift:
     url: https://github.com/Cascable/cascablecore-swift.git
     from: 14.0.0
 
@@ -17,7 +17,7 @@ targets:
     sources: 
       - Sources
     dependencies:
-      - package: CascableCore
+      - package: CascableCoreSwift
     info:
       path: Info.plist
       properties:
