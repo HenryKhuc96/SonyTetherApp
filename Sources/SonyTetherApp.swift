@@ -33,10 +33,9 @@ class CascableTetherManager: NSObject, ObservableObject, CBLCameraDiscoveryDeleg
     }
     
     private func setupCascableDiscovery() {
-        let discovery = CBLCameraDiscovery.sharedInstance()
+        let discovery = CBLCameraDiscovery.shared
         discovery.delegate = self
         discovery.clientName = "iPad Pro Tether"
-        // Mặc định beginSearching() đã tự động quét cả USB và Network
         discovery.beginSearching()
     }
     
@@ -91,21 +90,19 @@ class CascableTetherManager: NSObject, ObservableObject, CBLCameraDiscoveryDeleg
                 self.statusMessage = "⚡ Đang nhận ảnh từ bộ nhớ đệm Sony..."
             }
             
-            // 1. Lấy ảnh Preview hiển thị nhanh lên iPad
             if request.canProvide(.preview) {
-                request.generatePreviewImage({ previewImage, _ in
+                request.generatePreviewImage { previewImage, _ in
                     if let previewImage = previewImage {
                         DispatchQueue.main.async {
                             self.lastPhotoPreview = previewImage
                         }
                     }
-                })
+                }
             }
             
-            // 2. Lưu file gốc (Original) về thư mục tạm rồi đẩy vào Photos
             if request.canProvide(.original) {
                 let tempDir = FileManager.default.temporaryDirectory
-                request.writeOriginalData(toDestinationFolder: tempDir, completionHandler: { savedURL, error in
+                request.writeOriginalData(toDestinationFolder: tempDir) { savedURL, error in
                     if let savedURL = savedURL, error == nil {
                         self.saveToPhotosLibrary(fileURL: savedURL)
                     } else {
@@ -113,7 +110,7 @@ class CascableTetherManager: NSObject, ObservableObject, CBLCameraDiscoveryDeleg
                             self.statusMessage = "❌ Lỗi nhận file gốc: \(error?.localizedDescription ?? "Không rõ")"
                         }
                     }
-                })
+                }
             }
         })
     }
@@ -146,13 +143,13 @@ class CascableTetherManager: NSObject, ObservableObject, CBLCameraDiscoveryDeleg
     func triggerShutter() {
         guard let camera = activeCamera, isConnected else { return }
         statusMessage = "📸 Đang lấy nét và chụp..."
-        camera.invokeOneShotShutterExplicitlyEngagingAutoFocus(true, completionCallback: { [weak self] error in
+        camera.invokeOneShotShutterExplicitlyEngagingAutoFocus(true) { [weak self] error in
             if let error = error {
                 DispatchQueue.main.async {
                     self?.statusMessage = "⚠️ Lỗi bấm cò: \(error.localizedDescription)"
                 }
             }
-        })
+        }
     }
     
     func toggleLiveView() {
@@ -164,15 +161,13 @@ class CascableTetherManager: NSObject, ObservableObject, CBLCameraDiscoveryDeleg
             liveViewImage = nil
         } else {
             isLiveViewActive = true
-            let deliveryHandler: CBLCameraLiveViewFrameDelivery = { [weak self] frame, completionHandler in
-                DispatchQueue.main.async {
-                    self?.liveViewImage = frame.image
-                    completionHandler()
-                }
-            }
-            
             camera.beginLiveViewStream(
-                delivery: deliveryHandler,
+                delivery: { [weak self] frame, completionHandler in
+                    DispatchQueue.main.async {
+                        self?.liveViewImage = frame.image
+                        completionHandler()
+                    }
+                },
                 deliveryQueue: DispatchQueue.main,
                 terminationHandler: { [weak self] _, _ in
                     DispatchQueue.main.async {
@@ -186,7 +181,7 @@ class CascableTetherManager: NSObject, ObservableObject, CBLCameraDiscoveryDeleg
     
     private func resetState(message: String) {
         if let camera = activeCamera, let token = transferObserverToken {
-            camera.removeCameraInitiatedTransferObserver(withToken: token)
+            camera.removeCameraInitiatedTransferObserver(token)
         }
         isConnected = false
         isLiveViewActive = false
