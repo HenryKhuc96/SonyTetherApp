@@ -1,10 +1,24 @@
+name: Build Unsigned IPA
+
+on:
+  push:
+    branches: [ main ]
+  workflow_dispatch:
+
 jobs:
   build:
-    runs-on: macos-15 # Đổi từ macos-14 (hoặc macos-latest cũ) sang macos-15
+    runs-on: macos-15
 
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
+
+      - name: Generate Xcode Project (XcodeGen)
+        run: |
+          if ! command -v xcodegen &> /dev/null; then
+            brew install xcodegen
+          fi
+          xcodegen generate
 
       - name: Build Unsigned App
         run: |
@@ -17,3 +31,15 @@ jobs:
             CODE_SIGN_IDENTITY="" \
             CODE_SIGNING_REQUIRED=NO \
             CODE_SIGNING_ALLOWED=NO
+
+      - name: Package IPA
+        run: |
+          mkdir -p Payload
+          cp -r build/Build/Products/Release-iphoneos/*.app Payload/
+          zip -r SonyTether_Unsigned.ipa Payload
+
+      - name: Upload IPA Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: SonyTether-IPA
+          path: SonyTether_Unsigned.ipa
